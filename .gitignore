@@ -43,3 +43,4 @@ MANIFEST
 .DS_Store
 Thumbs.db
 *.db
+/.spotipyoauthcache
