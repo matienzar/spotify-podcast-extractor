@@ -6,6 +6,7 @@ Extrae información detallada de podcasts de tus playlists de Spotify, los categ
 
 - ✅ **Extracción completa**: Título, descripción, duración, fechas, URLs
 - 🤖 **Categorización automática**: Usa Gemini AI para clasificar episodios inteligentemente
+- 💬 **Preguntas y Respuestas**: Pregunta en lenguaje natural sobre el contenido de tus podcasts
 - 💾 **Base de datos persistente**: SQLite para evitar procesar episodios duplicados
 - 📊 **Exportación a Excel**: Formato profesional con columnas ajustadas
 - 🔄 **Sincronización inteligente**: Solo procesa episodios nuevos
@@ -95,6 +96,11 @@ python spotify_podcast_extractor.py -p PLAYLIST_ID_AQUI
 python spotify_podcast_extractor.py --categorize-only
 ```
 
+#### Realizar una Pregunta sobre los Episodios
+```bash
+python spotify_podcast_extractor.py -q "¿Qué episodios hablan de startups?"
+```
+
 #### Solo Exportar Base de Datos Existente
 ```bash
 python spotify_podcast_extractor.py --export-only
@@ -172,6 +178,23 @@ MAX_CATEGORIES=8  # Evita fragmentación excesiva
 - "Negocios"
 - "Historia"
 - "Ciencia"
+
+---
+
+## 💬 Preguntas y Respuestas con IA
+
+Una vez que has procesado tus playlists, puedes usar la IA para "conversar" con tu base de datos de episodios.
+
+### Cómo Funciona
+- **Contexto Completo**: El script recupera todos los episodios de tu base de datos local.
+- **Prompt Inteligente**: Se envía a Gemini tu pregunta junto con los títulos y descripciones de los episodios como contexto.
+- **Respuesta Basada en Datos**: La IA tiene la instrucción estricta de responder **únicamente** con la información encontrada en tus podcasts, evitando inventar datos. Si no encuentra nada, te lo dirá.
+
+### Ejemplo de Uso
+Si ejecutas:
+```bash
+python spotify_podcast_extractor.py -q "¿Qué episodios hablan del poder del silencio en la comunicación?"
+```
 
 ## 🗃️ Base de Datos
 
