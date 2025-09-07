@@ -22,7 +22,7 @@ except ImportError:
     ResourceExhausted = Exception
     GEMINI_AVAILABLE = False
     print(
-        "⚠️ google-generativeai no instalado. Categorización automática deshabilitada."
+        "⚠️ google-generativeai no instalado. Categorización y preguntas deshabilitadas."
     )
 
 # Configurar logging
@@ -87,63 +87,63 @@ class SpotifyPodcastExtractor:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                               CREATE TABLE IF NOT EXISTS podcasts
-                               (
-                                   id
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   titulo
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   descripcion
-                                   TEXT,
-                                   duracion_minutos
-                                   REAL,
-                                   fecha_agregado_playlist
-                                   TEXT,
-                                   url_spotify
-                                   TEXT,
-                                   categoria
-                                   TEXT
-                                   DEFAULT
-                                   'Sin categorizar',
-                                   podcast_show_name
-                                   TEXT,
-                                   playlist_id
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   fecha_procesado
-                                   TEXT
-                                   DEFAULT
-                                   CURRENT_TIMESTAMP,
-                                   PRIMARY
-                                   KEY
-                               (
-                                   id,
-                                   playlist_id
-                               )
-                                   )
-                               """
+                    CREATE TABLE IF NOT EXISTS podcasts
+                    (
+                        id
+                        TEXT
+                        NOT
+                        NULL,
+                        titulo
+                        TEXT
+                        NOT
+                        NULL,
+                        descripcion
+                        TEXT,
+                        duracion_minutos
+                        REAL,
+                        fecha_agregado_playlist
+                        TEXT,
+                        url_spotify
+                        TEXT,
+                        categoria
+                        TEXT
+                        DEFAULT
+                        'Sin categorizar',
+                        podcast_show_name
+                        TEXT,
+                        playlist_id
+                        TEXT
+                        NOT
+                        NULL,
+                        fecha_procesado
+                        TEXT
+                        DEFAULT
+                        CURRENT_TIMESTAMP,
+                        PRIMARY
+                        KEY
+                    (
+                        id,
+                        playlist_id
+                    )
+                        )
+                    """
                 )
                 cursor.execute(
                     """
-                               CREATE TABLE IF NOT EXISTS playlists
-                               (
-                                   id
-                                   TEXT
-                                   PRIMARY
-                                   KEY,
-                                   nombre
-                                   TEXT,
-                                   ultima_sincronizacion
-                                   TEXT
-                                   DEFAULT
-                                   CURRENT_TIMESTAMP
-                               )
-                               """
+                    CREATE TABLE IF NOT EXISTS playlists
+                    (
+                        id
+                        TEXT
+                        PRIMARY
+                        KEY,
+                        nombre
+                        TEXT,
+                        ultima_sincronizacion
+                        TEXT
+                        DEFAULT
+                        CURRENT_TIMESTAMP
+                    )
+                    """
                 )
                 conn.commit()
                 logger.info(f"Base de datos inicializada: {self.db_path}")
@@ -261,6 +261,9 @@ class SpotifyPodcastExtractor:
 
     def get_playlist_episodes(self, playlist_id: str) -> List[Dict]:
         try:
+            if not self.sp:
+                logger.error("La conexión con Spotify no está inicializada.")
+                return []
             playlist_info = self.sp.playlist(playlist_id)
             playlist_name = playlist_info["name"]
             logger.info(f"Procesando playlist: {playlist_name}")
@@ -343,9 +346,11 @@ class SpotifyPodcastExtractor:
             return
         uncategorized = self.get_uncategorized_episodes()
         if not uncategorized:
-            logger.info("No hay episodios pendientes.")
+            logger.info("No hay episodios pendientes de categorizar.")
             return
-        logger.info(f"Encontrados {len(uncategorized)} episodios pendientes.")
+        logger.info(
+            f"Encontrados {len(uncategorized)} episodios pendientes de categorizar."
+        )
         existing_categories = self._get_existing_categories()
         logger.info(f"Se usarán {len(existing_categories)} categorías como contexto.")
         categorization_map = self._categorize_episodes_batch(
@@ -358,7 +363,7 @@ class SpotifyPodcastExtractor:
                     ep["id"], ep["playlist_id"], categorization_map[ep["id"]]
                 )
                 updated_count += 1
-        logger.info(f"Se actualizaron {updated_count} episodios.")
+        logger.info(f"Se actualizaron las categorías de {updated_count} episodios.")
 
     def episode_exists_in_db(self, episode_id: str, playlist_id: str) -> bool:
         with sqlite3.connect(self.db_path) as conn:
@@ -486,13 +491,94 @@ class SpotifyPodcastExtractor:
             logger.error(f"Error obteniendo stats: {e}")
             return {}
 
+    def answer_question_about_episodes(self, question: str) -> Optional[str]:
+        if not self.use_gemini or not self.model:
+            logger.error(
+                "Gemini no está configurado. No se puede procesar la pregunta."
+            )
+            return None
+
+        logger.info("Recuperando episodios de la base de datos para responder...")
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, titulo, descripcion FROM podcasts")
+            episodes_for_prompt = [
+                {"id": row[0], "titulo": row[1], "descripcion": (row[2] or "")[:500]}
+                for row in cursor.fetchall()
+            ]
+
+        if not episodes_for_prompt:
+            logger.warning(
+                "No hay episodios en la base de datos para realizar la pregunta."
+            )
+            return "No se encontraron episodios en la base de datos para analizar."
+
+        prompt = f"""
+        ROL: Eres un asistente experto en analizar contenido de podcasts.
+        TAREA: Responder a la pregunta del usuario basándote ÚNICA Y EXCLUSIVAMENTE en la lista de episodios proporcionada en el JSON.
+
+        PREGUNTA DEL USUARIO: "{question}"
+
+        REGLAS ESTRICTAS:
+        1.  Tu respuesta debe basarse SOLAMENTE en la información de los episodios del JSON.
+        2.  NO PUEDES inventar, suponer o añadir información externa.
+        3.  Si la respuesta no se encuentra en la descripción o título de los episodios, debes responder: "No he encontrado información sobre este tema en los episodios."
+        4.  Si encuentras episodios relevantes, lista sus títulos y un resumen muy breve de por qué son relevantes para la pregunta.
+
+        LISTA DE EPISODIOS (JSON):
+        {json.dumps(episodes_for_prompt, ensure_ascii=False, indent=2)}
+
+        Ahora, por favor, responde a la pregunta del usuario siguiendo las reglas.
+        """
+
+        try:
+            logger.info(
+                f"Enviando pregunta a Gemini sobre {len(episodes_for_prompt)} episodios..."
+            )
+            self._throttle_requests()
+            response = self.model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            logger.error(
+                f"Error al procesar la pregunta con Gemini: {e}", exc_info=True
+            )
+            return "Ocurrió un error al contactar con el modelo de IA."
+
+
+# ==============================================================================
+# Funciones de ayuda (Definidas antes de ser llamadas en main)
+# ==============================================================================
+
+
+def _export_and_log_stats(
+    extractor: SpotifyPodcastExtractor,
+    output_file: Optional[str],
+    playlist_id: Optional[str],
+):
+    """Exporta los datos a Excel y muestra estadísticas en la consola."""
+    filename = extractor.export_to_excel(output_file, playlist_id)
+    if filename:
+        logger.info(f"🎉 ¡Proceso completado! Archivo generado: {filename}")
+        stats = extractor.get_database_stats()
+        if stats and stats.get("top_categories"):
+            logger.info("🏆 Top 5 categorías:")
+            for cat, count in stats["top_categories"][:5]:
+                logger.info(f"   - {cat}: {count} episodios")
+    else:
+        logger.warning("⚠️ No se generó el archivo Excel (puede que no haya datos).")
+
+
+# ==============================================================================
+# Función Principal
+# ==============================================================================
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extrae y categoriza podcasts de Spotify.",
+        description="Extrae, categoriza y busca en podcasts de Spotify.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    # ... (La definición de los argumentos del parser no cambia)
+
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "-p",
@@ -510,6 +596,13 @@ def main():
         action="store_true",
         help="Solo exporta la base de datos a Excel.",
     )
+    mode_group.add_argument(
+        "-q",
+        "--question",
+        dest="user_question",
+        help="Realiza una pregunta sobre los episodios de la base de datos.",
+    )
+
     parser.add_argument(
         "--no-llm", action="store_true", help="Desactiva la categorización con Gemini."
     )
@@ -530,23 +623,14 @@ def main():
 
     db_path = "spotify_podcasts.db"
     if args.reset_db:
-        if (
-            input(
-                f"¿Seguro que quieres borrar la base de datos '{db_path}'? (s/N): "
-            ).lower()
-            == "s"
-        ):
-            try:
-                if os.path.exists(db_path):
-                    os.remove(db_path)
-                    logger.info("✅ Base de datos reseteada.")
-                else:
-                    logger.info("No existía base de datos para resetear.")
-            except Exception as e:
-                logger.error(f"Error reseteando DB: {e}", exc_info=True)
+        if input(f"¿Seguro que quieres borrar '{db_path}'? (s/N): ").lower() == "s":
+            if os.path.exists(db_path):
+                os.remove(db_path)
+                logger.info("✅ Base de datos reseteada.")
         else:
             logger.info("Operación cancelada.")
-        return logger.info("Todo OK")
+        return logger.info("Fin del reset")
+
     # Carga de configuración
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -555,30 +639,47 @@ def main():
     model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash")
     max_categories = int(os.getenv("MAX_CATEGORIES", "10"))
     playlist_id_from_env = os.getenv("SPOTIFY_PLAYLIST_ID")
-
     playlist_id = args.playlist_id or playlist_id_from_env
 
     try:
-        # --- LÓGICA DE VALIDACIÓN CORREGIDA ---
         if args.export_only:
-            # Para exportar, no necesitamos credenciales de Spotify
             extractor = SpotifyPodcastExtractor(
                 client_id=None,
                 client_secret=None,
                 redirect_uri=None,
                 gemini_api_key=None,
+                db_path=db_path,  # CORRECCIÓN: Pasar db_path
             )
             logger.info("🏃‍♂️ Modo: solo exportar.")
             _export_and_log_stats(
                 extractor, args.output_file, args.playlist_id_for_export
             )
+
+        elif args.user_question:
+            if not gemini_api_key:
+                return logger.error(
+                    "❌ Se requiere GEMINI_API_KEY en .env para esta función."
+                )
+            extractor = SpotifyPodcastExtractor(
+                client_id=None,
+                client_secret=None,
+                redirect_uri=None,
+                gemini_api_key=gemini_api_key,
+                model_name=model_name,
+                db_path=db_path,  # CORRECCIÓN
+            )
+            logger.info(f"Preguntando al modelo: '{args.user_question}'")
+            answer = extractor.answer_question_about_episodes(args.user_question)
+            if answer:
+                print("\n" + "=" * 25 + " RESPUESTA DEL ASISTENTE " + "=" * 25)
+                print(answer)
+                print("=" * 75 + "\n")
+
         else:
-            # Para el resto de tareas, sí validamos las credenciales
             if not all([client_id, client_secret, redirect_uri]):
                 return logger.error(
-                    "❌ Faltan credenciales de Spotify (SPOTIPY_CLIENT_ID, etc.) en el archivo .env."
+                    "❌ Faltan credenciales de Spotify en el archivo .env."
                 )
-
             if not gemini_api_key and not args.no_llm:
                 logger.warning(
                     "⚠️ GEMINI_API_KEY no configurado. Se omitirá la categorización."
@@ -591,41 +692,23 @@ def main():
                 gemini_api_key=gemini_api_key,
                 model_name=model_name,
                 max_categories=max_categories,
+                db_path=db_path,
             )
 
             if args.categorize_only:
                 logger.info("🏃‍♂️ Modo: solo categorizar pendientes.")
                 extractor.categorize_pending_episodes()
                 _export_and_log_stats(extractor, args.output_file, None)
-            else:  # Flujo principal por defecto
+            else:
                 if not playlist_id:
-                    return logger.error(
-                        "❌ No se ha definido un ID de playlist (con -p o en SPOTIFY_PLAYLIST_ID)."
-                    )
+                    return logger.error("❌ No se ha definido un ID de playlist.")
                 logger.info(f"Iniciando proceso para la playlist: {playlist_id}")
                 extractor.get_playlist_episodes(playlist_id=playlist_id)
                 extractor.categorize_pending_episodes()
                 _export_and_log_stats(extractor, args.output_file, playlist_id)
 
     except Exception as e:
-        logger.error(f"❌ Error en la ejecución: {e}", exc_info=True)
-
-
-def _export_and_log_stats(
-    extractor: SpotifyPodcastExtractor,
-    output_file: Optional[str],
-    playlist_id: Optional[str],
-):
-    filename = extractor.export_to_excel(output_file, playlist_id)
-    if filename:
-        logger.info(f"🎉 ¡Proceso completado! Archivo generado: {filename}")
-        stats = extractor.get_database_stats()
-        if stats and stats.get("top_categories"):
-            logger.info("🏆 Top 5 categorías:")
-            for cat, count in stats["top_categories"][:5]:
-                logger.info(f"   - {cat}: {count} episodios")
-    else:
-        logger.warning("⚠️ No se generó el archivo Excel (puede que no haya datos).")
+        logger.error(f"❌ Error fatal en la ejecución: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
